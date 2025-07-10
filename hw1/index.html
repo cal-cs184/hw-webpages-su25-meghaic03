@@ -1,112 +1,230 @@
-<html>
-	<head>
-		<script src='https://cdnjs.cloudflare.com/ajax/libs/mathjax/2.7.4/MathJax.js?config=default'></script>
-		<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600&display=swap" rel="stylesheet">
-		<style>
-			h1 {
-				text-align: center;
-			}
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>CS184/284A Spring 2025 Homework 1 Write-Up – Meghai Choudhury</title>
+  <style>
+    body {
+      font-family: Georgia, serif;
+      max-width: 900px;
+      margin: auto;
+      padding: 40px 20px;
+      line-height: 1.6;
+      background: #fff;
+    }
+    img {
+      max-width: 100%;
+      height: auto;
+      display: block;
+      margin: 1em 0;
+    }
+    .image-row {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 1em;
+    }
+    .image-col {
+      flex: 1;
+      text-align: center;
+    }
+    .image-caption {
+      font-size: 0.9em;
+      color: #555;
+      margin-top: 0.5em;
+    }
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      margin: 1em 0;
+    }
+    th, td {
+      border: 1px solid #999;
+      padding: 8px;
+      text-align: left;
+    }
+    details {
+      border: 1px solid #ccc;
+      border-radius: 6px;
+      padding: 0.5em 1em;
+      margin: 1em 0;
+      background: #f9f9f9;
+    }
+    summary {
+      font-weight: bold;
+      font-size: 1.2em;
+      cursor: pointer;
+    }
+  </style>
+</head>
+<body>
 
-			.container {
-				margin: 0 auto;
-				padding: 60px 20%;
-			}
+<h1>CS184/284A Spring 2025 Homework 1 Write-Up</h1>
+<p>Meghai Choudhury</p>
+<p>Link to webpage: <a href="https://cal-cs184.github.io/hw-webpages-su25-meghaic03/hw1/index.html">https://cal-cs184.github.io/hw-webpages-su25-meghaic03/hw1/index.html</a></p>
+<p>Link to GitHub repository: <a href="https://github.com/cal-cs184/hw-rasterizer-team/tree/meghai">https://github.com/cal-cs184/hw-rasterizer-team/tree/meghai</a> (branch meghai)</p>
 
-			figure {
-				text-align: center;
-			}
+<details open>
+  <summary>Task 1</summary>
+  <p>To rasterize triangles, we started by computing the bounding box of the triangle, which is just the smallest axis-aligned rectangle that fully contains the triangle. This helped us limit how many pixels we needed to check, instead of iterating over the entire screen. We calculated the min and max x/y values among the three vertices:</p>
+  <pre>
+int min_x = floor(min({x0, x1, x2}));
+int max_x = ceil(max({x0, x1, x2}));
+int min_y = floor(min({y0, y1, y2}));
+int max_y = ceil(max({y0, y1, y2}));
+  </pre>
+  <p>Within this bounding box, we checked if the sample lies inside the triangle using edge functions. These are cross products of the triangle edges with the vector to the point we’re testing.
+  The key line that does this check looks like:</p>
+  <pre>
+bool inside = (edge1 >= 0 && edge2 >= 0 && edge3 >= 0) || 
+              (edge1 <= 0 && edge2 <= 0 && edge3 <= 0);
+  </pre>
+  <p>If the point is inside the triangle, we colored that subpixel in the supersample buffer.</p>
+  <p>The algorithm loops only within the triangle's bounding box, which guarantees we check only pixels that could be covered by the triangle, which already limits how much work we do. Because of the edge function test, we avoid doing extra math for pixels clearly outside the triangle.
+  This method is no worse than a brute force check because it only loops within the bounding box (so fewer iterations), it does a constant number of arithmetic operations per subpixel, and it never checks outside the triangle’s potential area.</p>
+  <img src="task1.png" alt="Task 1" />
+  <p>Extra credit: We added an optimization that keeps track of when we first start seeing a pixel that has any subpixel inside the triangle, and once we’ve passed that and hit a row where no subpixels are inside, we break early from the loop. This avoids checking scan lines that are definitely empty after the triangle ends vertically.</p>
+  <pre>
+if (pixel_has_any_inside) in_triangle = true;
+else if (in_triangle) break;
+  </pre>
+  <p>We added a timer using chrono at the start and end of the triangle rasterization function to measure how long it takes:</p>
+  <table>
+    <tr><th>Optimization</th><th>Time (?s)</th></tr>
+    <tr><td>No early exit</td><td>4533</td></tr>
+    <tr><td>With early exit</td><td>1092</td></tr>
+  </table>
+  <p>This shows a speedup, especially for large triangles with lots of empty scanlines.</p>
+</details>
 
-			img {
-				display: inline-block;
-			}
+<details>
+  <summary>Task 2</summary>
+  <p>Supersampling is used to reduce aliasing artifacts, such as jaggies, by taking multiple samples per pixel and averaging them. Instead of determining a pixel’s color based on a single point, we take multiple samples within the pixel and blend them, resulting in smoother lines, curves, and triangle edges.</p>
+  <p>Our supersampling implementation works by doing the following:<br>
+  Create a sample_buffer of size width*height*sample_rate <br>
+  Store each subsample linearly using index = ((y * width + x) * sample_rate) + (i * sqrt_rate + j);<br>
+  x, y are pixel coordinates<br>
+  i, j are the subpixel offsets <br>
+  sqrt_rate is the square root of the same_rate<br>
+  Loop through all subsamples (in rasterize_triangle)<br>
+  Compute coordinates of each subpixel:<br>
+  float sub_x = x + (i + 0.5f) / sqrt_rate;<br>
+  float sub_y = y + (j + 0.5f) / sqrt_rate;<br>
+  Use the edge function test to see if the subsample is inside of the triangle<br>
+  If it is, write the color to the correct sample_buffer index<br>
+  At the end (in resolve_to_framebuffer()), average the sample_rate subsamples per pixel<br>
+  Convert col to RBG and store it in rgb_framebuffer_target</p>
+  <div class="image-row">
+    <div class="image-col">
+      <img src="task2_1.png" alt="1 sample per pixel" />
+      <div class="image-caption">1 sample per pixel</div>
+    </div>
+    <div class="image-col">
+      <img src="task2_2.png" alt="4 samples per pixel" />
+      <div class="image-caption">4 samples per pixel</div>
+    </div>
+    <div class="image-col">
+      <img src="task2_3.png" alt="16 samples per pixel" />
+      <div class="image-caption">16 samples per pixel</div>
+    </div>
+  </div>
+  <p>These results are observed because with 1 sample per pixel (no supersampling), the pixel is either the triangle or not, leading to jaggies. With 4 samples, there are softer edges because intermediate colors are used to represent either 25%, 50%, or 75% filled. At 9, then 16 samples per pixel, the transitions get even smoother, and this is evident when zooming into the triangle tips or edges at small angles.</p>
+</details>
 
-			body {
-				font-family: 'Inter', sans-serif;
-			}
-		</style>
-	</head>
-	<body>
-		<div class="container">
-		<h1>CS184/284A Spring 2025 Homework 1 Write-Up</h1>
-		<div style="text-align: center;">Names: </div>
+<details>
+  <summary>Task 3</summary>
+  <p>I wanted the cubeman to look like a baby dancing, with their short arms pointing in different directions.</p>
+  <img src="task3.png" alt="Task 3" />
+</details>
 
-		<br>
+<details>
+  <summary>Task 4</summary>
+  <p>Barycentric coordinates are a way to describe the position of a point inside a triangle using weights from the triangle’s three vertices. If you have a triangle with points A, B, and C, any point inside the triangle can be written as a combination of those three: P=αA+βB+γC
+  The key is that the weights (α, β, γ) always add up to 1. For example, if a point is exactly on vertex A, α will be 1 and the others 0, and so on. The closer the point is to a vertex, the more weight that vertex contributes. This makes barycentric coordinates really useful for interpolating things like color or texture coordinates across the triangle.</p>
+  <img src="task4.png" alt="Task 4" />
+</details>
 
-		Link to webpage: (TODO) <a href="https://cs184.eecs.berkeley.edu/sp25">cs184.eecs.berkeley.edu/sp25</a>
-		
-		<br>
+<details>
+  <summary>Task 5</summary>
+  <p>Pixel sampling is how we figure out what color to use when mapping a texture image onto a triangle in our scene. Since the texture coordinates (u, v) usually don’t line up perfectly with pixel centers in the image, we need a strategy for choosing which texture color to assign to each subpixel in the triangle.
+  There are two main pixel sampling methods we worked with: nearest sampling, and bilinear sampling.</p>
+  <img src="task5-1.png" alt="Nearest sampling @ 1 spp" />
+  <p><em>Nearest sampling @ 1 spp: The texture looks jagged and aliased: especially around the edges and diagonals.</em></p>
+  <img src="task5-2.png" alt="Nearest sampling @ 16 spp" />
+  <p><em>Nearest sampling @ 16 spp: Slightly better due to supersampling, but still shows harsh blocky transitions.</em></p>
+  <p>Instead of picking just one texel, bilinear sampling blends the colors of the four texels surrounding the (u, v) point.</p>
+  <img src="task5-3.png" alt="Bilinear sampling @ 1 spp" />
+  <p><em>Bilinear sampling @ 1 spp: Already much smoother than nearest, even without supersampling.</em></p>
+  <img src="task5-4.png" alt="Bilinear sampling @ 16 spp" />
+  <p><em>Bilinear sampling @ 16 spp: Best result, soft, clean transitions with no visible aliasing or pixelation.</em></p>
+</details>
 
-		Link to GitHub repository: (TODO) <a href="https://cs184.eecs.berkeley.edu/sp25">cs184.eecs.berkeley.edu/sp25</a>
+<details>
+  <summary>Task 6</summary>
+  <p>Level sampling is a technique we use in texture mapping to decide which resolution of a texture to sample from. When a texture is far away or scaled down, we don’t need to sample from the full-resolution image (that would be wasteful and could cause aliasing. Instead, we use mipmaps, which are precomputed, smaller versions of the texture, and choose the one that best fits how the texture appears on screen.
+In our rasterize_textured_triangle() function, we calculated the screen-space partial derivatives of the texture coordinates (du/dx, du/dy, dv/dx, dv/dy) using barycentric coordinates and the triangle's transformation matrix. These were stored in the SampleParams struct as p_dx_uv and p_dy_uv.
+Then, depending on the selected LevelSampleMethod (e.g., L_ZERO, L_NEAREST), we computed a mipmap level using
+</p>
+  <pre>
+float L = max(norm(p_dx_uv), norm(p_dy_uv));
+float level = log2(L);
+  </pre>
+  <p>Here’s a quick summary of the tradeoffs we noticed when using different combinations of sampling strategies:</p>
+  <table>
+    <tr>
+      <th>Technique</th>
+      <th>Image</th>
+      <th>Speed</th>
+      <th>Memory Usage</th>
+      <th>Antialiasing Quality</th>
+    </tr>
+    <tr>
+      <td>P_NEAREST + L_ZERO</td>
+      <td><img src="task6-1.png" alt="task6-1"></td>
+      <td>Fastest</td>
+      <td>Low</td>
+      <td>Poor (lots of aliasing)</td>
+    </tr>
+    <tr>
+      <td>P_LINEAR + L_ZERO</td>
+      <td><img src="task6-2.png" alt="task6-2"></td>
+      <td>Fast</td>
+      <td>Low</td>
+      <td>Better than nearest</td>
+    </tr>
+    <tr>
+      <td>P_NEAREST + L_NEAREST</td>
+      <td><img src="task6-3.png" alt="task6-3"></td>
+      <td>Medium</td>
+      <td>Higher</td>
+      <td>Medium quality</td>
+    </tr>
+    <tr>
+      <td>P_LINEAR + L_NEAREST</td>
+      <td><img src="task6-4.png" alt="task6-4"></td>
+      <td>Slower</td>
+      <td>Higher</td>
+      <td>Best quality overall</td>
+    </tr>
+  </table>
+</details>
 
-		<figure>
-			<img src="lion.jpg" alt="Lion" style="width:50%"/>
-			<figcaption>You can add images with captions!</figcaption>
-		</figure>
+<details>
+  <summary>Task 7 (Extra Credit)</summary>
+  <p>To create this image, I first drew a pixel art bunny using the Piskel app and exported it as a PNG file. Then, I used a Python script (png_to_svg.py) to convert the PNG into an SVG file made up of colored rectangles, turning the raster image into a vectorized pixel art representation.</p>
 
-		<!--
-		We've already added one heading per task, to make your write-up as navigable when grading. Please fit your write-up within these sections!
-		-->
+<p>For the script, I used ChatGPT for minimal assistance in understanding how to do the following:<br>
+Load and resize the PNG image using the Pillow library<br>
+Loop through each pixel and extract its RGBA values<br>
+Format the RGB values into hexadecimal color codes<br>
+Write each pixel as a &lt;rect&gt; element into an SVG file<br>
+Save the final output at a desired resolution and grid size</p>
 
-		<h2>Overview</h2>
-		Give a high-level overview of what you implemented in this homework. Think about what you've built as a whole. Share your thoughts on what interesting things you've learned from completing the homework.
+<p>I carefully reviewed and modified the script to fully understand each part. For example, I learned how to use Python's f-string formatting to convert RGB values into hex codes (#{r:02x}{g:02x}{b:02x}), and how to calculate the correct size and position for each rectangle on the SVG canvas.</p>
 
-		<h2>Task 1: Drawing Single-Color Triangles</h2>
-		Lorem ipsum dolor sit amet, consectetur adipiscing elit, sed do eiusmod tempor incididunt ut labore et dolore magna aliqua. Ut enim ad minim veniam, quis nostrud exercitation ullamco laboris nisi ut aliquip ex ea commodo consequat. Duis aute irure dolor in reprehenderit in voluptate velit esse cillum dolore eu fugiat nulla pariatur. Excepteur sint occaecat cupidatat non proident, sunt in culpa qui officia deserunt mollit anim id est laborum.
+<p>The final script is included in my src/ directory as png_to_svg.py, and the output image is saved as competition.svg in the docs/ folder.</p>
 
-		<p>Here is an example 2x2 gridlike structure using an HTML table. Each <b>tr</b> is a row and each <b>td</b> is a column in that row. You might find this useful for framing and showing your result images in an organized fashion.</p>
-		<div style="display: flex; flex-direction: column; align-items: center;">
-			<table style="width: 100%; text-align: center; border-collapse: collapse;">
-			  <tr>
-				<td style="text-align: center;">
-				  <img src="lion.jpg" width="400px"/>
-				  <figcaption>Caption goes here.</figcaption>
-				</td>
-				<td style="text-align: center;">
-				  <img src="lion.jpg" width="400px"/>
-				  <figcaption>Caption goes here.</figcaption>
-				</td>
-			  </tr>
-			  <tr>
-				<td style="text-align: center;">
-				  <img src="lion.jpg" width="400px"/>
-				  <figcaption>Caption goes here.</figcaption>
-				</td>
-				<td style="text-align: center;">
-				  <img src="lion.jpg" width="400px"/>
-				  <figcaption>Caption goes here.</figcaption>
-				</td>
-			  </tr>
-			</table>
-		</div>
-		
-		<h2>Task 2: Antialiasing by Supersampling</h2>
-		Lorem ipsum dolor sit amet, consectetur adipiscing elit, sed do eiusmod tempor incididunt ut labore et dolore magna aliqua. Ut enim ad minim veniam, quis nostrud exercitation ullamco laboris nisi ut aliquip ex ea commodo consequat. Duis aute irure dolor in reprehenderit in voluptate velit esse cillum dolore eu fugiat nulla pariatur. Excepteur sint occaecat cupidatat non proident, sunt in culpa qui officia deserunt mollit anim id est laborum.
+<img src="ec.png" alt="Extra credit bunny" />
+</details>
 
-		<h2>Task 3: Transforms</h2>
-		Lorem ipsum dolor sit amet, consectetur adipiscing elit, sed do eiusmod tempor incididunt ut labore et dolore magna aliqua. Ut enim ad minim veniam, quis nostrud exercitation ullamco laboris nisi ut aliquip ex ea commodo consequat. Duis aute irure dolor in reprehenderit in voluptate velit esse cillum dolore eu fugiat nulla pariatur. Excepteur sint occaecat cupidatat non proident, sunt in culpa qui officia deserunt mollit anim id est laborum.
-
-		<h2>Task 4: Barycentric coordinates</h2>
-		Lorem ipsum dolor sit amet, consectetur adipiscing elit, sed do eiusmod tempor incididunt ut labore et dolore magna aliqua. Ut enim ad minim veniam, quis nostrud exercitation ullamco laboris nisi ut aliquip ex ea commodo consequat. Duis aute irure dolor in reprehenderit in voluptate velit esse cillum dolore eu fugiat nulla pariatur. Excepteur sint occaecat cupidatat non proident, sunt in culpa qui officia deserunt mollit anim id est laborum.
-
-		<h2>Task 5: "Pixel sampling" for texture mapping</h2>
-		Lorem ipsum dolor sit amet, consectetur adipiscing elit, sed do eiusmod tempor incididunt ut labore et dolore magna aliqua. Ut enim ad minim veniam, quis nostrud exercitation ullamco laboris nisi ut aliquip ex ea commodo consequat. Duis aute irure dolor in reprehenderit in voluptate velit esse cillum dolore eu fugiat nulla pariatur. Excepteur sint occaecat cupidatat non proident, sunt in culpa qui officia deserunt mollit anim id est laborum.
-
-		<h2>Task 6: "Level Sampling" with mipmaps for texture mapping</h2>
-		Lorem ipsum dolor sit amet, consectetur adipiscing elit, sed do eiusmod tempor incididunt ut labore et dolore magna aliqua. Ut enim ad minim veniam, quis nostrud exercitation ullamco laboris nisi ut aliquip ex ea commodo consequat. Duis aute irure dolor in reprehenderit in voluptate velit esse cillum dolore eu fugiat nulla pariatur. Excepteur sint occaecat cupidatat non proident, sunt in culpa qui officia deserunt mollit anim id est laborum.
-
-		<h2>(Optional) Task 7: Extra Credit - Draw Something Creative!</h2>
-		Lorem ipsum dolor sit amet, consectetur adipiscing elit, sed do eiusmod tempor incididunt ut labore et dolore magna aliqua. Ut enim ad minim veniam, quis nostrud exercitation ullamco laboris nisi ut aliquip ex ea commodo consequat. Duis aute irure dolor in reprehenderit in voluptate velit esse cillum dolore eu fugiat nulla pariatur. Excepteur sint occaecat cupidatat non proident, sunt in culpa qui officia deserunt mollit anim id est laborum.
-
-		<h2>Additional Notes (please remove)</h2>
-		<ul>
-			<li>You can also add code if you'd like as so: <code>code code code</code></li>
-			<li>If you'd like to add math equations, 
-				<ul>
-					<li>You can write inline equations like so: \( a^2 + b^2 = c^2 \)</li>
-					<li>You can write display equations like so: \[ a^2 + b^2 = c^2 \]</li>
-				</ul>
-			</li>
-		</ul>
-		</div>
-	</body>
+</body>
 </html>
